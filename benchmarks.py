@@ -1,0 +1,566 @@
+import numpy as np
+import pandas as pd
+from empty_box import BasePortfolioStrategy
+import cvxpy as cp
+from sklearn.svm import LinearSVR
+from sklearn.linear_model import Ridge
+import logging
+
+commission = 0.0005
+
+
+class UniformStrategy(BasePortfolioStrategy):
+    """Бенчмарк 1: Равновзвешенный инвестор.
+    Делит капитал поровну между всеми доступными на момент ребалансировки активами."""
+    def __init__(self):
+        super().__init__(name="Uniform_1/N")
+
+    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray, volatility_history: pd.DataFrame = None) -> np.ndarray:
+        N = historical_returns.shape[1]
+        weights = np.ones(N) / N
+        return weights
+
+
+class RandomMonkeyStrategy(BasePortfolioStrategy):
+    """Бенчмарк 2: Случайный инвестор.
+    Генерирует случайные веса на каждой ребалансировке. Ребалансировки реже обычного."""
+    def __init__(self):
+        super().__init__(name="Random_Monkey")
+
+    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray, volatility_history: pd.DataFrame = None) -> np.ndarray:
+        N = historical_returns.shape[1]
+        random_vectors = np.random.rand(N)
+        weights = random_vectors / np.sum(random_vectors)
+        return weights
+
+
+class StochasticMomentumStrategy(BasePortfolioStrategy):
+    """Бенчмарк 3: Вероятностный Ротатор.
+    Рассчитывает доходность активов за среднесрочное скользящее окно (3 месяца),
+    отсекает отрицательные результаты, нормирует оставшиеся в вероятности
+    и случайным образом выбирает, какие активы купить."""
+    def __init__(self, lookback_days: int = 63, num_pick_assets: int = 3):
+        super().__init__(name="Stochastic_Momentum")
+        self.lookback = lookback_days
+        self.num_picks = num_pick_assets
+
+    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray, volatility_history: pd.DataFrame = None) -> np.ndarray:
+        N = historical_returns.shape[1]
+        weights = np.zeros(N)
+
+        if len(historical_returns) < self.lookback:
+            return np.ones(N) / N
+
+        recent_history = historical_returns.tail(self.lookback)
+        cum_returns = np.nanprod(1.0 + recent_history.to_numpy(), axis=0) - 1.0
+
+        cum_returns[cum_returns < 0.0] = 0.0
+
+        sum_positive = np.sum(cum_returns)
+
+        if sum_positive == 0:
+            return np.ones(N) / N
+
+        probabilities = cum_returns / sum_positive
+        probabilities = probabilities / np.sum(probabilities)
+
+        chosen_indices = np.random.choice(N, size=min(self.num_picks, np.count_nonzero(cum_returns)), replace=False, p=probabilities)
+
+        weights[chosen_indices] = 1.0 / len(chosen_indices)
+        return weights / np.sum(weights)
+
+
+class PersonalProfileStrategy(BasePortfolioStrategy):
+    """Бенчмарк 4: Мой Инвестиционный Профиль.
+    Распределяет капитал по жесткой иерархии классов активов: Возраст% в ОФЗ/Корпораты и возможно в ВДО,
+    5% в Металлы по среднему распределению, Валютный коридор (переключение на Юань в 2022) и остаток в Акции."""
+    def __init__(self, age_weight: float = 0.2, currency_weight: float = 0.10, lookback_days: int = 63):
+        super().__init__(name="Personal_Profile")
+        self.age_w = age_weight
+        self.fx_w = currency_weight
+        self.metals_w = 0.05
+        self.reit_w = 0.03
+        self.lookback = lookback_days
+
+    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray, volatility_history: pd.DataFrame = None) -> np.ndarray:
+        columns = list(historical_returns.columns)
+        N = len(columns)
+        weights = np.zeros(N)
+
+        if len(historical_returns) < self.lookback:
+            return np.ones(N) / N
+
+        current_date = historical_returns.index[-1]
+        recent_history = historical_returns.tail(self.lookback)
+
+        equity_cols = [c for c in columns if c not in ['ОФЗ, фикс 1+', 'ОФЗ, фикс 5-10', 'ВДО, фикс', 'Денежный рынок(LQDT)',
+                                                       'Доллар', 'Евро', 'Юань', 'Недвижимость', 'Золото', 'Серебро']]
+        market_trend = 0.0
+        if equity_cols:
+            market_trend = np.nanmean(np.nanprod(1.0 + recent_history[equity_cols].to_numpy(), axis=0) - 1.0)
+
+        if market_trend >= 0.10:
+            current_cash_w = 0.10
+        elif market_trend <= -0.10:
+            current_cash_w = 0.0
+        else:
+            current_cash_w = 0.05 + (market_trend / 0.10) * 0.05
+
+        if 'Денежный рынок(LQDT)' in columns:
+            weights[columns.index('Денежный рынок(LQDT)')] = current_cash_w
+
+            lqdt_ret = recent_history['Денежный рынок(LQDT)'].to_numpy()
+            half = len(lqdt_ret) // 2
+            rate_momentum = np.nansum(lqdt_ret[half:]) - np.nansum(lqdt_ret[:half])
+
+            if rate_momentum > 0.0001:
+                w_short, w_long, w_high_yield = 0.8, 0.1, 0.1
+            elif rate_momentum < -0.0001:
+                w_short, w_long, w_high_yield = 0.2, 0.7, 0.1
+            elif lqdt_ret[-1] < (1.06) ** (1 / 250) - 1:
+                w_short, w_long, w_high_yield = 0.3, 0.2, 0.5
+            else:
+                w_short, w_long, w_high_yield = 0.4, 0.6, 0.0
+
+            if 'ОФЗ, фикс 1+' in columns:
+                weights[columns.index('ОФЗ, фикс 1+')] = w_short * self.age_w
+            if 'ОФЗ, фикс 5-10' in columns:
+                weights[columns.index('ОФЗ, фикс 5-10')] = w_long * self.age_w
+            if 'ВДО, фикс' in columns:
+                weights[columns.index('ВДО, фикс')] = w_high_yield * self.age_w
+
+        active_fx = 'Доллар' if current_date < pd.Timestamp('2022-06-01') else 'Юань'
+
+        if active_fx in columns:
+            global_fx_series = np.cumprod(1.0 + historical_returns[active_fx].to_numpy())
+            fx_curr = global_fx_series[-1]
+            fx_mean = np.mean(global_fx_series[-self.lookback:])
+
+            if fx_curr <= fx_mean:
+                fx_target_w = self.fx_w
+            else:
+                deviation = (fx_curr - fx_mean) / fx_mean
+                fx_target_w = max(0.0, self.fx_w * (1.0 - deviation / 0.10))
+
+            weights[columns.index(active_fx)] = fx_target_w
+
+        if 'Золото' in columns and 'Серебро' in columns:
+            idx_g = columns.index('Золото')
+            idx_s = columns.index('Серебро')
+
+            g_prices = np.cumprod(1.0 + recent_history['Золото'].to_numpy())
+            s_prices = np.cumprod(1.0 + recent_history['Серебро'].to_numpy())
+
+            met_curr = g_prices[-1] / s_prices[-1]
+
+            l, m, h = 0.02, 0.03, 0.045
+            if met_curr < 1:
+                weights[idx_g] = min(h, m + (1.0 - met_curr) * (h - m) / 0.3)
+            else:
+                weights[idx_g] = max(l, m - (met_curr - 1) * (m - l) / 0.3)
+
+            weights[idx_s] = self.metals_w - weights[idx_g]
+
+        if 'Недвижимость' in columns:
+            weights[columns.index('Недвижимость')] = self.reit_w
+
+        allocated_cash = np.sum(weights)
+        remaining_cash = 1.0 - allocated_cash
+
+        if remaining_cash > 0 and equity_cols:
+            equity_indices = [columns.index(c) for c in equity_cols]
+            weights[equity_indices] = remaining_cash / len(equity_indices)
+
+        return weights / np.sum(weights)
+
+
+class MarkowitzStrategy(BasePortfolioStrategy):
+    """Классическая Mean-Variance оптимизация Марковица в CVXPY.
+    Минимизирует риск портфеля с учетом транзакционных издержек (L1-штраф)"""
+    def __init__(self, target_daily_return: float = 0.0006):
+        super().__init__(name="Markowitz_MV")
+        self.target_return = target_daily_return
+        self.commission = commission
+
+    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray,
+                         volatility_history: pd.DataFrame = None) -> np.ndarray:
+        columns = list(historical_returns.columns)
+        N = len(columns)
+        current_date = historical_returns.index[-1].strftime("%Y-%m-%d")
+
+        # 1. Фильтрация доступных ("живых") активов
+        live_mask = ~historical_returns.iloc[-1].isna().to_numpy()
+        live_indices = np.where(live_mask)[0]
+
+        if len(live_indices) == 0:
+            return prev_weights.copy()  # Возвращаем копию во избежание side-effects
+
+        live_cols = [columns[i] for i in live_indices]
+        N_live = len(live_cols)
+
+        # Берем историю за последние 252 торговых дня
+        df_live = historical_returns[live_cols].tail(252)
+
+        # 2. Корректный расчет средних доходностей и ковариации без fillna(0.0)
+        # Использование np.nanmean и min_periods=10 защищает от занижения волатильности нулями
+        mean_returns_live = np.nanmean(df_live.to_numpy(), axis=0)
+        mean_returns_live = np.nan_to_num(mean_returns_live, nan=0.0)
+
+        sigma_live = df_live.cov(min_periods=10).fillna(0.0).to_numpy()
+        sigma_live += np.eye(N_live) * 1e-6  # Регуляризация (числовая стабильность)
+
+        # 3. Переменные оптимизации
+        w_live = cp.Variable(N_live)
+        portfolio_risk = cp.quad_form(w_live, sigma_live)
+
+        # 4. Исправление логики транзакционных издержек (Turnover Penalty)
+        # Вместо нормировки к 1.0 используем реальные исторические веса.
+        # Если актив выпал, его прошлый вес в оптимизаторе равен 0, а комиссия спишется за закрытие позиции.
+        prev_weights_live = prev_weights[live_indices]
+
+        # Защита от NaN в прошлых весах
+        prev_weights_live = np.nan_to_num(prev_weights_live, nan=0.0)
+
+        turnover_penalty = self.commission * cp.sum(cp.abs(w_live - prev_weights_live))
+
+        # 5. Построение целевой функции и базовых ограничений
+        objective = cp.Minimize(portfolio_risk + turnover_penalty)
+        constraints = [cp.sum(w_live) == 1.0, w_live >= 0.0]
+
+        # 6. Адаптивное ограничение на целевую доходность
+        if np.max(mean_returns_live) >= self.target_return:
+            constraints.append(mean_returns_live @ w_live >= self.target_return)
+        elif (median_returns := np.median(mean_returns_live)) > 0:
+            constraints.append(mean_returns_live @ w_live >= median_returns)
+        else:
+            constraints.append(mean_returns_live @ w_live >= np.min(mean_returns_live))
+
+        prob = cp.Problem(objective, constraints)
+
+        # 7. Исправление ошибки Read-Only с помощью явного выделения памяти под np.zeros
+        global_weights_series = pd.Series(np.zeros(N, dtype=np.float64), index=columns)
+
+        # 8. Решение основной задачи
+        try:
+            prob.solve()
+        except Exception:
+            prob.status = "Failed"
+
+        if prob.status == cp.OPTIMAL and w_live.value is not None:
+            global_weights_series[live_cols] = w_live.value
+            return global_weights_series.to_numpy()
+
+        # 9. Защитный фолбэк (Fallback) при недостижимости ограничений доходности
+        logging.warning(f"[МАРКОВИЦ КРИЗИС] {current_date}: Задача Infeasible. Активирован защитный фолбэк.")
+
+        prob_fallback = cp.Problem(cp.Minimize(portfolio_risk + turnover_penalty),
+                                   [cp.sum(w_live) == 1.0, w_live >= 0.0])
+
+        try:
+            prob_fallback.solve()
+            if prob_fallback.status == cp.OPTIMAL and w_live.value is not None:
+                global_weights_series[live_cols] = w_live.value
+                return global_weights_series.to_numpy()
+        except Exception: return prev_weights.copy()
+
+
+class MlHeavyweightStrategy(BasePortfolioStrategy):
+    """Бенчмарк 6 (ИИ-Тяжеловес): Макро-Адаптивный Регрессионный Робот (SVR + Ridge).
+    Обучается на импульсах цен, индивидуальной волатильности акций и ставках РЕПО.
+    Распределяет капитал через экспоненциальный Softmax. В кризисы уходит на 100% в LQDT."""
+    def __init__(self, train_window: int = 252, temperature: float = 0.05):
+        super().__init__(name="ML_Macro_Heavyweight")
+        self.train_window = train_window
+        self.tau = temperature
+
+    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray, volatility_history: pd.DataFrame = None) -> np.ndarray:
+        columns = list(historical_returns.columns)
+        N = len(columns)
+        weights = np.zeros(N)
+
+        if len(historical_returns) < self.train_window:
+            return np.ones(N) / N
+
+        df_train = historical_returns.tail(self.train_window).ffill().fillna(0.0)
+        T_train = len(df_train)
+
+        lqdt_ret = df_train['Денежный рынок(LQDT)'].to_numpy() if 'Денежный рынок(LQDT)' in columns else np.zeros(
+            T_train)
+
+        rate_ma = pd.Series(lqdt_ret).rolling(22, min_periods=1).mean().to_numpy()
+        rate_change = rate_ma - lqdt_ret
+        market_vol = df_train.std(axis=1).to_numpy()
+
+        predicted_alphas = np.zeros(N)
+        safe_names = ['ОФЗ, фикс 1+', 'ОФЗ, фикс 5-10', 'ВДО, фикс', 'Денежный рынок(LQDT)', 'Доллар', 'Евро', 'Юань',
+                      'Недвижимость', 'Золото', 'Серебро']
+
+        for i, col in enumerate(columns):
+            if col in safe_names:
+                continue
+
+            asset_returns = df_train[col].to_numpy()
+
+            mom_1m = pd.Series(asset_returns).rolling(22, min_periods=1).mean().to_numpy()
+            mom_3m = pd.Series(asset_returns).rolling(63, min_periods=1).mean().to_numpy()
+            asset_vol = pd.Series(asset_returns).rolling(22, min_periods=1).std().fillna(0.0).to_numpy()
+
+            X = np.column_stack([mom_1m, mom_3m, asset_vol, rate_change, market_vol])
+
+            X_clean = X[:-1]
+            y_clean = asset_returns[1:]
+
+            model_svr = LinearSVR(epsilon=0.0, C=1.0, loss='epsilon_insensitive', random_state=42, max_iter=2000)
+            model_svr.fit(X_clean, y_clean)
+
+            model_ridge = Ridge(alpha=1.0, random_state=42)
+            model_ridge.fit(X_clean, y_clean)
+
+            next_features = X[-1].reshape(1, -1)
+            pred_svr = model_svr.predict(next_features)[0]
+            pred_ridge = model_ridge.predict(next_features)[0]
+
+            predicted_alphas[i] = 0.5 * pred_svr + 0.5 * pred_ridge
+
+        predicted_alphas[predicted_alphas < 0.0] = 0.0
+        sum_positive_signals = np.sum(predicted_alphas)
+
+        if sum_positive_signals > 0.00001:
+            exp_alphas = np.exp(predicted_alphas / self.tau)
+            exp_alphas[predicted_alphas == 0.0] = 0.0
+
+            equity_weights = exp_alphas / np.sum(exp_alphas)
+
+            for i, col in enumerate(columns):
+                if col not in safe_names:
+                    weights[i] = equity_weights[i]
+
+            remaining_cash = 1.0 - np.sum(weights)
+            if remaining_cash > 0 and 'Денежный рынок(LQDT)' in columns:
+                weights[columns.index('Денежный рынок(LQDT)')] = remaining_cash
+        else:
+            if 'Денежный рынок(LQDT)' in columns:
+                weights[columns.index('Денежный рынок(LQDT)')] = 1.0
+            else:
+                weights = np.ones(N) / N
+
+        return weights / np.sum(weights)
+
+
+class RobustParabolicCvarStrategy(BasePortfolioStrategy):
+    """ФЛАГМАНСКАЯ МОДЕЛЬ: Робастный CVaR Рокафеллара-Урясьева
+    с мульти-параболической ядерной функцией памяти времени (Kernel Memory).
+    - Ограничение горизонта: строго 4 года (1000 торговых дней).
+    - Геометрия куполов: полностью динамическая, h_w = T / count_similar.
+    - Адаптивный поиск: расширяет окно допуска, пока не найдет минимум 4 параболы.
+    - Краевой эффект кризисов: выравнивание площади через 1/Area_current первообразной."""
+    def __init__(self, eta: float = 1.0):
+        super().__init__(name="Robust_Parabolic_CVaR_Flagship")
+        self.eta = eta
+        self.commission = commission
+        self.max_horizon = 1000
+        self.target_area = 1.0
+        self.current_market_panic = 1.0
+
+    def _parabolic_integral(self, x, x_0, a, c):
+        return -(a / 3.0) * ((x - x_0) ** 3) + c * x
+
+    def _generate_parabolic_kernel_weights(self, returns_np: np.ndarray, vol_matrix_np: np.ndarray) -> np.ndarray:
+        T = len(returns_np)
+        W_total = np.zeros(T)
+
+        market_track = np.mean(returns_np, axis=1)
+        raw_market_vol = np.mean(vol_matrix_np, axis=1)
+        t_axis = np.arange(T)
+        convex_time_bonds = 1.0 - ((T - 1.0 - t_axis) / (T - 1.0)) ** 2
+        vol_history = (raw_market_vol * convex_time_bonds) / (np.sum(convex_time_bonds) / T)
+        current_vol = vol_history[-1]
+
+        current_trend_val = np.nansum(market_track[-5:])
+        if current_trend_val > 0.005:
+            current_trend_regime = 1
+        elif current_trend_val < -0.005:
+            current_trend_regime = -1
+        else:
+            current_trend_regime = 0
+
+        time_axis = np.arange(T)
+
+        vol_std = np.std(vol_history)
+        if vol_std == 0: vol_std = 0.001
+
+        k_multiplier = 0.1
+        similar_indices = []
+
+        pilot_matches = 0
+        for t in range(1, T):
+            if abs(vol_history[t] - current_vol) <= vol_std:
+                pilot_matches += 1
+
+        min_target_proportions = max(3, pilot_matches//3)
+
+        while k_multiplier <= 3.0:
+            similar_indices = []
+            current_allowed_gap = k_multiplier * vol_std
+
+            for t in range(1, T):
+                past_trend_val = np.nansum(market_track[max(0, t - 5):t + 1])
+                if past_trend_val > 0.005:
+                    past_trend_regime = 1
+                elif past_trend_val < -0.005:
+                    past_trend_regime = -1
+                else:
+                    past_trend_regime = 0
+
+                if abs(vol_history[t] - current_vol) <= current_allowed_gap and past_trend_regime == current_trend_regime:
+                    similar_indices.append((t, t))
+
+            if len(similar_indices) >= min_target_proportions:
+                break
+
+            k_multiplier += 0.2
+
+        count_similar = len(similar_indices)
+        dynamic_base_hw = T / max(1, count_similar)
+        dynamic_base_hw = np.clip(dynamic_base_hw, 20.0, 250.0)
+
+        parabolic_kernels = []
+        for t, _ in similar_indices:
+            x_0 = t
+            h_w = dynamic_base_hw
+            if x_0 - h_w < 0: continue
+
+            a = 1.0 / (h_w ** 2)
+            c = ((3.0 / 4.0) * self.target_area * np.sqrt(a)) ** (2.0 / 3.0)
+            parabolic_kernels.append((x_0, a, c, False))
+
+        for x_0, a, c, is_active_now in parabolic_kernels:
+            f = -a * (time_axis - x_0) ** 2 + c
+            W_total += (f + np.abs(f)) / 2.0
+
+        if T < 250:
+            self.current_market_panic = 1.0
+            sum_W = np.sum(W_total)
+            return W_total / sum_W
+
+        skew_window = 21
+        skew_history = np.zeros(T)
+        for t in range(skew_window, T):
+            window = market_track[t - skew_window:t + 1]
+            mean_w = np.mean(window)
+            std_w = np.std(window)
+            if std_w > 0: skew_history[t] = np.mean((window - mean_w) ** 3) / (std_w ** 3)
+
+        valid_skews = skew_history[skew_window:]
+        if len(valid_skews) > 0:
+            skew_threshold = np.mean(valid_skews) - 1.0 * np.std(valid_skews)
+        else:
+            skew_threshold = -0.5
+
+        working_skew = skew_history.copy()
+        max_stretch_factor = 1.0
+        crisis_kernels = []
+
+        for _ in range(15):
+            min_idx = np.argmin(working_skew)
+            min_val = working_skew[min_idx]
+
+            if min_val >= skew_threshold or min_val == 0.0:
+                break
+
+            x_0 = max(0, min_idx - skew_window)
+            h_w = dynamic_base_hw
+            a = 1.0 / (h_w ** 2)
+            c = ((3.0 / 4.0) * self.target_area * np.sqrt(a)) ** (2.0 / 3.0)
+
+            root_delta = np.sqrt(max(0.0, c / a))
+            left_root = max(0, int(np.floor(x_0 - root_delta)))
+            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))
+
+            is_active_now = (T - 1 <= right_root)
+            crisis_kernels.append((x_0, a, c, is_active_now))
+
+            safe_left = min(left_root, max(0, min_idx - skew_window))
+            safe_right = max(right_root, min(T - 1, min_idx + skew_window))
+            working_skew[safe_left:safe_right + 1] = 0.0
+
+        for x_0, a, c, is_active_now in crisis_kernels:
+            f = -a * (time_axis - x_0) ** 2 + c
+            positive_coupon = (f + np.abs(f)) / 2.0
+
+            root_delta = np.sqrt(max(0.0, c / a))
+            left_root = max(0, int(np.floor(x_0 - root_delta)))
+            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))
+
+            actual_area = self._parabolic_integral(right_root, x_0, a, c) - self._parabolic_integral(left_root, x_0, a, c)
+
+            if actual_area > 0:
+                stretch_factor = self.target_area / actual_area
+                positive_coupon *= stretch_factor
+
+                if is_active_now:
+                    if stretch_factor > max_stretch_factor:
+                        max_stretch_factor = stretch_factor
+
+            W_total += positive_coupon
+
+        self.current_market_panic = max_stretch_factor
+        sum_W = np.sum(W_total)
+        return W_total / sum_W
+
+    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray, volatility_history: pd.DataFrame = None) -> np.ndarray:
+        columns = list(historical_returns.columns)
+        N = len(columns)
+        current_date = historical_returns.index[-1].strftime("%Y-%m-%d")
+
+        df_window = historical_returns.tail(self.max_horizon)
+        returns_np = df_window.to_numpy()
+        clean_returns_np = np.nan_to_num(returns_np, nan=0.0)
+        T_window = len(clean_returns_np)
+
+        df_vol_window = volatility_history.tail(self.max_horizon) if volatility_history is not None else historical_returns.tail(self.max_horizon)
+        vol_matrix_np = np.nan_to_num(df_vol_window.to_numpy(), nan=0.0005)
+
+        W_days = self._generate_parabolic_kernel_weights(clean_returns_np, vol_matrix_np)
+        parabolic_mean_returns = np.sum(clean_returns_np * W_days[:, None], axis=0)
+        weighted_returns = clean_returns_np * W_days[:, None]
+
+        beta = 0.95
+        w = cp.Variable(N)
+        alpha = cp.Variable()
+        u = cp.Variable(T_window)
+
+        losses = -weighted_returns @ w
+        cvar_loss = alpha + (1.0 / (1.0 - beta)) * cp.mean(u)
+        turnover_penalty = self.commission * cp.sum(cp.abs(w - prev_weights))
+        adaptive_eta = self.eta / (self.current_market_panic ** 2)
+        growth_incentive = adaptive_eta * (parabolic_mean_returns @ w)
+
+        objective = cp.Minimize(cvar_loss + turnover_penalty - growth_incentive)
+
+        constraints = [
+            cp.sum(w) == 1.0,
+            w >= 0.0,
+            u >= 0.0,
+            u >= losses - alpha
+        ]
+
+        safe_names = ['ОФЗ, фикс 1+', 'ОФЗ, фикс 5-10', 'Денежный рынок(LQDT)', 'Доллар', 'Евро', 'Юань',
+                      'Недвижимость', 'Золото']
+
+        for i, col in enumerate(columns):
+            if col not in safe_names: constraints.append(w[i] <= 0.10)
+
+        prob = cp.Problem(objective, constraints)
+        prob.solve()
+
+        if prob.status == cp.OPTIMAL:
+            return w.value
+        else:
+            logging.warning(f"[ROBUST CVAR КРИЗИС] {current_date}: Задача Infeasible. Активирован защитного фолбэка.")
+            prob_fallback = cp.Problem(cp.Minimize(cvar_loss + turnover_penalty), constraints)
+            prob_fallback.solve()
+            if prob_fallback.status == cp.OPTIMAL and w.value is not None:
+                return w.value
+
+            return prev_weights
