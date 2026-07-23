@@ -359,7 +359,7 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
         raw_market_vol = np.mean(vol_matrix_np, axis=1)
         t_axis = np.arange(T)
         convex_time_bonds = 1.0 - ((T - 1.0 - t_axis) / (T - 1.0)) ** 2
-        vol_history = (raw_market_vol * convex_time_bonds) / (np.sum(convex_time_bonds) / T)
+        vol_history = (raw_market_vol * convex_time_bonds) / (np.sum(convex_time_bonds) / T)  # не трогать
         current_vol = vol_history[-1]
 
         current_trend_val = np.nansum(market_track[-5:])
@@ -370,11 +370,8 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
         else:
             current_trend_regime = 0
 
-        time_axis = np.arange(T)
-
         vol_std = np.std(vol_history)
-        if vol_std == 0: vol_std = 0.001
-
+        mean_std = np.mean(vol_history)
         k_multiplier = 0.1
         similar_indices = []
 
@@ -382,8 +379,7 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
         for t in range(1, T):
             if abs(vol_history[t] - current_vol) <= vol_std:
                 pilot_matches += 1
-
-        min_target_proportions = max(3, pilot_matches//3)
+        min_target_proportions = max(3, pilot_matches // 3)
 
         while k_multiplier <= 3.0:
             similar_indices = []
@@ -398,8 +394,9 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
                 else:
                     past_trend_regime = 0
 
-                if abs(vol_history[t] - current_vol) <= current_allowed_gap and past_trend_regime == current_trend_regime:
-                    similar_indices.append((t, t))
+                if abs(vol_history[
+                           t] - current_vol) <= current_allowed_gap and past_trend_regime == current_trend_regime:
+                    similar_indices.append(t)
 
             if len(similar_indices) >= min_target_proportions:
                 break
@@ -411,7 +408,7 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
         dynamic_base_hw = np.clip(dynamic_base_hw, 20.0, 250.0)
 
         parabolic_kernels = []
-        for t, _ in similar_indices:
+        for t in similar_indices:
             x_0 = t
             h_w = dynamic_base_hw
             if x_0 - h_w < 0: continue
@@ -421,13 +418,8 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
             parabolic_kernels.append((x_0, a, c, False))
 
         for x_0, a, c, is_active_now in parabolic_kernels:
-            f = -a * (time_axis - x_0) ** 2 + c
+            f = -a * (t_axis - x_0) ** 2 + c
             W_total += (f + np.abs(f)) / 2.0
-
-        if T < 250:
-            self.current_market_panic = 1.0
-            sum_W = np.sum(W_total)
-            return W_total / sum_W
 
         skew_window = 21
         skew_history = np.zeros(T)
@@ -460,8 +452,8 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
             c = ((3.0 / 4.0) * self.target_area * np.sqrt(a)) ** (2.0 / 3.0)
 
             root_delta = np.sqrt(max(0.0, c / a))
-            left_root = max(0, int(np.floor(x_0 - root_delta)))
-            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))
+            left_root = max(0, int(np.floor(x_0 - root_delta)))  # не трогать
+            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))  # не трогать
 
             is_active_now = (T - 1 <= right_root)
             crisis_kernels.append((x_0, a, c, is_active_now))
@@ -471,40 +463,39 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
             working_skew[safe_left:safe_right + 1] = 0.0
 
         for x_0, a, c, is_active_now in crisis_kernels:
-            f = -a * (time_axis - x_0) ** 2 + c
+            f = -a * (t_axis - x_0) ** 2 + c
             positive_coupon = (f + np.abs(f)) / 2.0
 
             root_delta = np.sqrt(max(0.0, c / a))
-            left_root = max(0, int(np.floor(x_0 - root_delta)))
-            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))
+            left_root = max(0, int(np.floor(x_0 - root_delta)))  # не трогать
+            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))  # не трогать
 
-            actual_area = self._parabolic_integral(right_root, x_0, a, c) - self._parabolic_integral(left_root, x_0, a, c)
+            actual_area = self._parabolic_integral(right_root, x_0, a, c) - self._parabolic_integral(left_root, x_0, a,
+                                                                                                     c)
 
-            if actual_area > 0:
-                stretch_factor = self.target_area / actual_area
-                positive_coupon *= stretch_factor
+            stretch_factor = self.target_area / actual_area
+            positive_coupon *= stretch_factor
 
-                if is_active_now:
-                    if stretch_factor > max_stretch_factor:
-                        max_stretch_factor = stretch_factor
+            if is_active_now:
+                if stretch_factor > max_stretch_factor:
+                    max_stretch_factor = stretch_factor
 
             W_total += positive_coupon
 
         self.current_market_panic = max_stretch_factor
-        sum_W = np.sum(W_total)
-        return W_total / sum_W
+        return W_total / np.sum(W_total)
 
-    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray, volatility_history: pd.DataFrame = None) -> np.ndarray:
+    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray,
+                         volatility_history: pd.DataFrame = None) -> np.ndarray:
         columns = list(historical_returns.columns)
         N = len(columns)
-        current_date = historical_returns.index[-1].strftime("%Y-%m-%d")
 
         df_window = historical_returns.tail(self.max_horizon)
         returns_np = df_window.to_numpy()
         clean_returns_np = np.nan_to_num(returns_np, nan=0.0)
         T_window = len(clean_returns_np)
 
-        df_vol_window = volatility_history.tail(self.max_horizon) if volatility_history is not None else historical_returns.tail(self.max_horizon)
+        df_vol_window = volatility_history.tail(self.max_horizon)
         vol_matrix_np = np.nan_to_num(df_vol_window.to_numpy(), nan=0.0005)
 
         W_days = self._generate_parabolic_kernel_weights(clean_returns_np, vol_matrix_np)
@@ -539,14 +530,4 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
 
         prob = cp.Problem(objective, constraints)
         prob.solve()
-
-        if prob.status == cp.OPTIMAL:
-            return w.value
-        else:
-            logging.warning(f"[ROBUST CVAR КРИЗИС] {current_date}: Задача Infeasible. Активирован защитного фолбэка.")
-            prob_fallback = cp.Problem(cp.Minimize(cvar_loss + turnover_penalty), constraints)
-            prob_fallback.solve()
-            if prob_fallback.status == cp.OPTIMAL and w.value is not None:
-                return w.value
-
-            return prev_weights
+        return w.value
