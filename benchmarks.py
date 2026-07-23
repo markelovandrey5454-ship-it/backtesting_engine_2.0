@@ -188,46 +188,35 @@ class MarkowitzStrategy(BasePortfolioStrategy):
         N = len(columns)
         current_date = historical_returns.index[-1].strftime("%Y-%m-%d")
 
-        # 1. Фильтрация доступных ("живых") активов
         live_mask = ~historical_returns.iloc[-1].isna().to_numpy()
         live_indices = np.where(live_mask)[0]
 
         if len(live_indices) == 0:
-            return prev_weights.copy()  # Возвращаем копию во избежание side-effects
+            return prev_weights.copy()
 
         live_cols = [columns[i] for i in live_indices]
         N_live = len(live_cols)
 
-        # Берем историю за последние 252 торговых дня
         df_live = historical_returns[live_cols].tail(252)
 
-        # 2. Корректный расчет средних доходностей и ковариации без fillna(0.0)
-        # Использование np.nanmean и min_periods=10 защищает от занижения волатильности нулями
         mean_returns_live = np.nanmean(df_live.to_numpy(), axis=0)
         mean_returns_live = np.nan_to_num(mean_returns_live, nan=0.0)
 
         sigma_live = df_live.cov(min_periods=10).fillna(0.0).to_numpy()
-        sigma_live += np.eye(N_live) * 1e-6  # Регуляризация (числовая стабильность)
+        sigma_live += np.eye(N_live) * 1e-6 
 
-        # 3. Переменные оптимизации
         w_live = cp.Variable(N_live)
         portfolio_risk = cp.quad_form(w_live, sigma_live)
 
-        # 4. Исправление логики транзакционных издержек (Turnover Penalty)
-        # Вместо нормировки к 1.0 используем реальные исторические веса.
-        # Если актив выпал, его прошлый вес в оптимизаторе равен 0, а комиссия спишется за закрытие позиции.
         prev_weights_live = prev_weights[live_indices]
 
-        # Защита от NaN в прошлых весах
         prev_weights_live = np.nan_to_num(prev_weights_live, nan=0.0)
 
         turnover_penalty = self.commission * cp.sum(cp.abs(w_live - prev_weights_live))
 
-        # 5. Построение целевой функции и базовых ограничений
         objective = cp.Minimize(portfolio_risk + turnover_penalty)
         constraints = [cp.sum(w_live) == 1.0, w_live >= 0.0]
 
-        # 6. Адаптивное ограничение на целевую доходность
         if np.max(mean_returns_live) >= self.target_return:
             constraints.append(mean_returns_live @ w_live >= self.target_return)
         elif (median_returns := np.median(mean_returns_live)) > 0:
@@ -237,10 +226,8 @@ class MarkowitzStrategy(BasePortfolioStrategy):
 
         prob = cp.Problem(objective, constraints)
 
-        # 7. Исправление ошибки Read-Only с помощью явного выделения памяти под np.zeros
         global_weights_series = pd.Series(np.zeros(N, dtype=np.float64), index=columns)
 
-        # 8. Решение основной задачи
         try:
             prob.solve()
         except Exception:
@@ -250,7 +237,6 @@ class MarkowitzStrategy(BasePortfolioStrategy):
             global_weights_series[live_cols] = w_live.value
             return global_weights_series.to_numpy()
 
-        # 9. Защитный фолбэк (Fallback) при недостижимости ограничений доходности
         logging.warning(f"[МАРКОВИЦ КРИЗИС] {current_date}: Задача Infeasible. Активирован защитный фолбэк.")
 
         prob_fallback = cp.Problem(cp.Minimize(portfolio_risk + turnover_penalty),
