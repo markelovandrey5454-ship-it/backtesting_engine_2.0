@@ -26,6 +26,8 @@ class PortfolioOrchestrator:
                 name = strat.name
 
                 historical_slice = self.board_panel[self.asset_tickers].loc[:current_date]
+                if len(historical_slice) > 1:
+                    historical_slice = historical_slice.iloc[:-1]
 
                 active_mask = ~historical_slice.iloc[-1].isna().to_numpy()
                 live_cols = [col for idx, col in enumerate(self.asset_tickers) if active_mask[idx]]
@@ -34,7 +36,6 @@ class PortfolioOrchestrator:
                 vol_slice = self.volatility_panel[live_cols].loc[:current_date] if hasattr(self,
                                                                                            'volatility_panel') else None
 
-                # Безопасное извлечение вчерашних весов без read-only блокировок NumPy
                 live_prev_weights = current_weights[name][active_mask].copy()
                 if np.sum(live_prev_weights) > 0:
                     live_prev_weights = live_prev_weights / np.sum(live_prev_weights)
@@ -42,7 +43,6 @@ class PortfolioOrchestrator:
                     live_prev_weights = np.zeros(len(live_cols))
 
                 try:
-                    # Ежедневный вызов оптимизатора
                     live_new_weights = strat.optimize_weights(cleaned_slice, live_prev_weights, vol_slice)
                     live_new_weights = np.nan_to_num(live_new_weights, nan=0.0)
                 except Exception as e:
