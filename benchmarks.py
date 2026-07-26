@@ -340,8 +340,8 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
     - Геометрия куполов: полностью динамическая, h_w = T / count_similar.
     - Адаптивный поиск: расширяет окно допуска, пока не найдет минимум 4 параболы.
     - Краевой эффект кризисов: выравнивание площади через 1/Area_current первообразной."""
-    def __init__(self, eta: float = 1.0):
-        super().__init__(name="Robust_Parabolic_CVaR_Flagship")
+    def __init__(self, eta: float = 0.2):
+        super().__init__(name="5")
         self.eta = eta
         self.commission = commission
         self.max_horizon = 1000
@@ -359,7 +359,7 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
         raw_market_vol = np.mean(vol_matrix_np, axis=1)
         t_axis = np.arange(T)
         convex_time_bonds = 1.0 - ((T - 1.0 - t_axis) / (T - 1.0)) ** 2
-        vol_history = (raw_market_vol * convex_time_bonds) / (np.sum(convex_time_bonds) / T)  # не трогать
+        vol_history = (raw_market_vol * convex_time_bonds) / (np.sum(convex_time_bonds) / T)
         current_vol = vol_history[-1]
 
         current_trend_val = np.nansum(market_track[-5:])
@@ -371,7 +371,6 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
             current_trend_regime = 0
 
         vol_std = np.std(vol_history)
-        mean_std = np.mean(vol_history)
         k_multiplier = 0.1
         similar_indices = []
 
@@ -452,8 +451,8 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
             c = ((3.0 / 4.0) * self.target_area * np.sqrt(a)) ** (2.0 / 3.0)
 
             root_delta = np.sqrt(max(0.0, c / a))
-            left_root = max(0, int(np.floor(x_0 - root_delta)))  # не трогать
-            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))  # не трогать
+            left_root = max(0, int(np.floor(x_0 - root_delta)))
+            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))
 
             is_active_now = (T - 1 <= right_root)
             crisis_kernels.append((x_0, a, c, is_active_now))
@@ -467,8 +466,8 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
             positive_coupon = (f + np.abs(f)) / 2.0
 
             root_delta = np.sqrt(max(0.0, c / a))
-            left_root = max(0, int(np.floor(x_0 - root_delta)))  # не трогать
-            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))  # не трогать
+            left_root = max(0, int(np.floor(x_0 - root_delta)))
+            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))
 
             actual_area = self._parabolic_integral(right_root, x_0, a, c) - self._parabolic_integral(left_root, x_0, a,
                                                                                                      c)
@@ -522,8 +521,306 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
             u >= losses - alpha
         ]
 
-        safe_names = ['ОФЗ, фикс 1+', 'ОФЗ, фикс 5-10', 'Денежный рынок(LQDT)', 'Доллар', 'Евро', 'Юань',
-                      'Недвижимость', 'Золото']
+        safe_names = ['ОФЗ, фикс 1+', 'Денежный рынок(LQDT)']
+
+        for i, col in enumerate(columns):
+            if col not in safe_names: constraints.append(w[i] <= 0.10)
+
+        prob = cp.Problem(objective, constraints)
+        prob.solve()
+        return w.value
+
+
+class RobustParabolicCvarStrategy_sp_760_325_me_95(BasePortfolioStrategy):
+    def __init__(self, eta: float = 1.0):
+        super().__init__(name="1")
+        self.eta = eta
+        self.commission = commission
+        self.max_horizon = 1000
+        self.target_area = 0.5
+        self.current_market_panic = 1.0
+
+    def _parabolic_integral(self, x, x_0, a, c):
+        return -(a / 3.0) * ((x - x_0) ** 3) + c * x
+
+    def _generate_parabolic_kernel_weights(self, returns_np: np.ndarray, vol_matrix_np: np.ndarray) -> np.ndarray:
+        T = len(returns_np)
+        W_total = np.zeros(T)
+        t_axis = np.arange(T)
+
+        mu_geom = np.exp(np.nanmean(np.log(1.0 + returns_np), axis=0)) - 1.0
+        raw_market_vol = np.mean(vol_matrix_np, axis=1)
+
+        current_state = np.hstack([vol_matrix_np[-1, :], returns_np[-1, :]])
+        rank_curr = np.argsort(np.argsort(current_state))
+
+        spearman_scores = np.zeros(T - 1)
+        for t in range(T - 1):
+            past_state_t = np.hstack([vol_matrix_np[t, :], returns_np[t, :]])
+            rank_past_t = np.argsort(np.argsort(past_state_t))
+
+            corr_matrix = np.corrcoef(rank_curr, rank_past_t)
+            spearman_scores[t] = corr_matrix[0, 1] if not np.isnan(corr_matrix[0, 1]) else 0.0
+
+        similar_indices = [t for t, score in enumerate(spearman_scores) if score >= 0.70]
+        if len(similar_indices) < 5: similar_indices = list(np.argsort(spearman_scores)[-5:])
+        sum_sim_market = sum(raw_market_vol[t] for t in similar_indices)
+
+        for t in similar_indices:
+            h_w = int(sum_sim_market / raw_market_vol[t])
+            h_w = np.clip(h_w, 7.0, 60.0)
+            x_0 = t + (h_w // 4)
+            if x_0 - h_w // 2 < 0: continue
+            c = 3.0 / (4.0 * h_w)
+            a = 3.0 / (h_w ** 3)
+            f = -a * (t_axis - x_0) ** 2 + c
+            W_total += (f + np.abs(f)) / 2.0
+
+        sigma_hist = np.nanstd(returns_np, axis=0)
+        sigma_hist = np.where(sigma_hist == 0.0, 1e-8, sigma_hist)
+
+        normalized_matrix = (returns_np - mu_geom) / sigma_hist
+        skew_history = np.mean(normalized_matrix ** 3, axis=1)
+
+        working_skew = skew_history.copy()
+        max_stretch_factor = 1.0
+        crisis_kernels = []
+
+        for _ in range(15):
+            min_idx = np.argmin(working_skew)
+            min_val = working_skew[min_idx]
+
+            if min_val == 0.0:
+                break
+
+            x_0 = min_idx
+            h_w = int(sum_sim_market / raw_market_vol[x_0])
+            h_w = np.clip(h_w, 3.0, 25.0)
+            c = 3.0 / (4.0 * h_w)
+            a = 3.0 / (h_w ** 3)
+
+            root_delta = np.sqrt(max(0.0, c / a))
+            left_root = max(0, int(np.floor(x_0 - root_delta)))
+            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))
+
+            is_active_now = (T - 1 == right_root)
+            crisis_kernels.append((x_0, a, c, is_active_now))
+
+            working_skew[left_root:(right_root + 1)] = 0.0
+
+        for x_0, a, c, is_active_now in crisis_kernels:
+            f = -a * (t_axis - x_0) ** 2 + c
+            positive_coupon = (f + np.abs(f)) / 2.0
+
+            root_delta = np.sqrt(max(0.0, c / a))
+            left_root = max(0, int(np.floor(x_0 - root_delta)))
+            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))
+
+            actual_area = self._parabolic_integral(right_root, x_0, a, c) - self._parabolic_integral(left_root, x_0, a,
+                                                                                                     c)
+
+            stretch_factor = self.target_area / actual_area
+            positive_coupon *= stretch_factor
+
+            if is_active_now:
+                if stretch_factor > max_stretch_factor:
+                    max_stretch_factor = stretch_factor
+
+            W_total += positive_coupon
+
+        self.current_market_panic = max_stretch_factor
+        return W_total / np.sum(W_total)
+
+    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray,
+                         volatility_history: pd.DataFrame = None) -> np.ndarray:
+        columns = list(historical_returns.columns)
+        N = len(columns)
+
+        df_window = historical_returns.tail(self.max_horizon)
+        returns_np = df_window.to_numpy()
+        clean_returns_np = np.nan_to_num(returns_np, nan=0.0)
+        T_window = len(clean_returns_np)
+
+        df_vol_window = volatility_history.tail(self.max_horizon)
+        vol_matrix_np = np.nan_to_num(df_vol_window.to_numpy(), nan=0.0005)
+
+        W_days = self._generate_parabolic_kernel_weights(clean_returns_np, vol_matrix_np)
+        parabolic_mean_returns = np.sum(clean_returns_np * W_days[:, None], axis=0)
+        weighted_returns = clean_returns_np * W_days[:, None]
+
+        beta = 0.95
+        w = cp.Variable(N)
+        alpha = cp.Variable()
+        u = cp.Variable(T_window)
+
+        losses = -weighted_returns @ w
+        cvar_loss = alpha + (1.0 / (1.0 - beta)) * cp.mean(u)
+        turnover_penalty = self.commission * cp.sum(cp.abs(w - prev_weights))
+        adaptive_eta = self.eta / (self.current_market_panic ** 2)
+        growth_incentive = adaptive_eta * (parabolic_mean_returns @ w)
+
+        objective = cp.Minimize(cvar_loss + turnover_penalty - growth_incentive)
+
+        constraints = [
+            cp.sum(w) == 1.0,
+            w >= 0.0,
+            u >= 0.0,
+            u >= losses - alpha
+        ]
+
+        safe_names = ['ОФЗ, фикс 1+', 'Денежный рынок(LQDT)']
+
+        for i, col in enumerate(columns):
+            if col not in safe_names: constraints.append(w[i] <= 0.10)
+
+        prob = cp.Problem(objective, constraints)
+        prob.solve()
+        return w.value
+
+
+class RobustParabolicCvarStrategy_mh_760_325_me_95(BasePortfolioStrategy):
+    def __init__(self, eta: float = 1.0):
+        super().__init__(name="2")
+        self.eta = eta
+        self.commission = commission
+        self.max_horizon = 1000
+        self.target_area = 0.5
+        self.current_market_panic = 1.0
+
+    def _parabolic_integral(self, x, x_0, a, c):
+        return -(a / 3.0) * ((x - x_0) ** 3) + c * x
+
+    def _generate_parabolic_kernel_weights(self, returns_np: np.ndarray, vol_matrix_np: np.ndarray) -> np.ndarray:
+        T = len(returns_np)
+        N = vol_matrix_np.shape[1]
+        window_length = int(N * 1.5)
+        W_total = np.zeros(T)
+        t_axis = np.arange(T)
+
+        mu_geom = np.exp(np.nanmean(np.log(1.0 + returns_np), axis=0)) - 1.0
+        raw_market_vol = np.mean(vol_matrix_np, axis=1)
+
+        local_window = vol_matrix_np[-window_length - 1:-1, :]
+        Sigma = np.cov(local_window, rowvar=False)
+        Sigma_stable = Sigma + np.eye(N) * 1e-6
+        Sigma_inv = np.linalg.inv(Sigma_stable)
+
+        mahalanobis_scores = np.zeros(T - 1)
+        x = vol_matrix_np[-1, :]
+
+        for t in range(T - 1):
+            y_t = vol_matrix_np[t, :]
+            delta = x - y_t
+            mahalanobis_scores[t] = np.sqrt(delta @ Sigma_inv @ delta.T)
+
+        mahalanobis_squared = mahalanobis_scores ** 2
+        similar_indices = [t for t, d2 in enumerate(mahalanobis_squared) if d2 <= chi2.ppf(0.90, N)]
+        if len(similar_indices) < 5: similar_indices = list(np.argsort(mahalanobis_scores)[:5])
+        sum_sim_market = sum(raw_market_vol[t] for t in similar_indices)
+
+        for t in similar_indices:
+            h_w = int(sum_sim_market / raw_market_vol[t])
+            h_w = np.clip(h_w, 7.0, 60.0)
+            x_0 = t + (h_w // 4)
+            if x_0 - h_w // 2 < 0: continue
+            c = 3.0 / (4.0 * h_w)
+            a = 3.0 / (h_w ** 3)
+            f = -a * (t_axis - x_0) ** 2 + c
+            W_total += (f + np.abs(f)) / 2.0
+
+        sigma_hist = np.nanstd(returns_np, axis=0)
+        sigma_hist = np.where(sigma_hist == 0.0, 1e-8, sigma_hist)
+
+        normalized_matrix = (returns_np - mu_geom) / sigma_hist
+        skew_history = np.mean(normalized_matrix ** 3, axis=1)
+
+        working_skew = skew_history.copy()
+        max_stretch_factor = 1.0
+        crisis_kernels = []
+
+        for _ in range(15):
+            min_idx = np.argmin(working_skew)
+            min_val = working_skew[min_idx]
+
+            if min_val == 0.0:
+                break
+
+            x_0 = min_idx
+            h_w = int(sum_sim_market / raw_market_vol[x_0])
+            h_w = np.clip(h_w, 3.0, 25.0)
+            c = 3.0 / (4.0 * h_w)
+            a = 3.0 / (h_w ** 3)
+
+            root_delta = np.sqrt(max(0.0, c / a))
+            left_root = max(0, int(np.floor(x_0 - root_delta)))
+            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))
+
+            is_active_now = (T - 1 == right_root)
+            crisis_kernels.append((x_0, a, c, is_active_now))
+
+            working_skew[left_root:(right_root + 1)] = 0.0
+
+        for x_0, a, c, is_active_now in crisis_kernels:
+            f = -a * (t_axis - x_0) ** 2 + c
+            positive_coupon = (f + np.abs(f)) / 2.0
+
+            root_delta = np.sqrt(max(0.0, c / a))
+            left_root = max(0, int(np.floor(x_0 - root_delta)))
+            right_root = min(T - 1, int(np.ceil(x_0 + root_delta)))
+
+            actual_area = self._parabolic_integral(right_root, x_0, a, c) - self._parabolic_integral(left_root, x_0, a,
+                                                                                                     c)
+
+            stretch_factor = self.target_area / actual_area
+            positive_coupon *= stretch_factor
+
+            if is_active_now:
+                if stretch_factor > max_stretch_factor:
+                    max_stretch_factor = stretch_factor
+
+            W_total += positive_coupon
+
+        self.current_market_panic = max_stretch_factor
+        return W_total / np.sum(W_total)
+
+    def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray,
+                         volatility_history: pd.DataFrame = None) -> np.ndarray:
+        columns = list(historical_returns.columns)
+        N = len(columns)
+
+        df_window = historical_returns.tail(self.max_horizon)
+        returns_np = df_window.to_numpy()
+        clean_returns_np = np.nan_to_num(returns_np, nan=0.0)
+        T_window = len(clean_returns_np)
+
+        df_vol_window = volatility_history.tail(self.max_horizon)
+        vol_matrix_np = np.nan_to_num(df_vol_window.to_numpy(), nan=0.0005)
+
+        W_days = self._generate_parabolic_kernel_weights(clean_returns_np, vol_matrix_np)
+        parabolic_mean_returns = np.sum(clean_returns_np * W_days[:, None], axis=0)
+        weighted_returns = clean_returns_np * W_days[:, None]
+
+        beta = 0.95
+        w = cp.Variable(N)
+        alpha = cp.Variable()
+        u = cp.Variable(T_window)
+
+        losses = -weighted_returns @ w
+        cvar_loss = alpha + (1.0 / (1.0 - beta)) * cp.mean(u)
+        turnover_penalty = self.commission * cp.sum(cp.abs(w - prev_weights))
+        adaptive_eta = self.eta / (self.current_market_panic ** 2)
+        growth_incentive = adaptive_eta * (parabolic_mean_returns @ w)
+
+        objective = cp.Minimize(cvar_loss + turnover_penalty - growth_incentive)
+
+        constraints = [
+            cp.sum(w) == 1.0,
+            w >= 0.0,
+            u >= 0.0,
+            u >= losses - alpha
+        ]
+
+        safe_names = ['ОФЗ, фикс 1+', 'Денежный рынок(LQDT)']
 
         for i, col in enumerate(columns):
             if col not in safe_names: constraints.append(w[i] <= 0.10)
