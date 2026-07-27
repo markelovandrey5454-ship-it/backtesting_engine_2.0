@@ -7,8 +7,8 @@ from backtest_engine import PortfolioOrchestrator, PortfolioBacktester
 from visualizer import PortfolioVisualizer
 
 from benchmarks import (
-                        UniformStrategy, RandomMonkeyStrategy, StochasticMomentumStrategy, PersonalProfileStrategy, MarkowitzStrategy, MlHeavyweightStrategy,
-                        RobustParabolicCvarStrategy)
+                        UniformStrategy, RandomMonkeyStrategy, StochasticMomentumStrategy, PersonalProfileStrategy, MlHeavyweightStrategy,
+                        RobustParabolicCvarStrategy, RobustParabolicCvarStrategy_mh, RobustParabolicCvarStrategy_cp, MarkowitzStrategy)
 
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -24,8 +24,8 @@ if __name__ == "__main__":
     volatility_panel = pd.read_csv(vol_path, parse_dates=['Date']).set_index('Date')
 
     strategies = [
-        UniformStrategy(), RandomMonkeyStrategy(), StochasticMomentumStrategy(), PersonalProfileStrategy(), MarkowitzStrategy(), MlHeavyweightStrategy(),
-        RobustParabolicCvarStrategy()
+        UniformStrategy(), RandomMonkeyStrategy(), StochasticMomentumStrategy(), PersonalProfileStrategy(), MlHeavyweightStrategy(),
+        RobustParabolicCvarStrategy(), RobustParabolicCvarStrategy_mh(), RobustParabolicCvarStrategy_cp(), MarkowitzStrategy()
     ]
 
     print("\n[ШАГ 1/3] Запуск динамической симуляции ребалансировок моделей...")
