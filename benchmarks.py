@@ -5,6 +5,7 @@ import cvxpy as cp
 from sklearn.svm import LinearSVR
 from sklearn.linear_model import Ridge
 import logging
+from scipy.stats import chi2
 
 commission = 0.0005
 
