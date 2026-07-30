@@ -532,14 +532,16 @@ class RobustParabolicCvarStrategy(BasePortfolioStrategy):
         return w.value
 
 
-class RobustParabolicCvarStrategy_sp_760_325_me_95(BasePortfolioStrategy):
-    def __init__(self, eta: float = 1.0):
-        super().__init__(name="1")
+class RobustParabolicCvarStrategy_cp_2(BasePortfolioStrategy):
+    def __init__(self, name: str = "2", cvar_lvl: float = 0.95, delt: float = 0.0, eta: float = 1.0):
+        super().__init__(name=name)
         self.eta = eta
         self.commission = commission
         self.max_horizon = 1000
         self.target_area = 0.5
         self.current_market_panic = 1.0
+        self.cvar_lvl = cvar_lvl
+        self.delt = delt
 
     def _parabolic_integral(self, x, x_0, a, c):
         return -(a / 3.0) * ((x - x_0) ** 3) + c * x
@@ -565,10 +567,10 @@ class RobustParabolicCvarStrategy_sp_760_325_me_95(BasePortfolioStrategy):
 
         similar_indices = [t for t, score in enumerate(spearman_scores) if score >= 0.70]
         if len(similar_indices) < 5: similar_indices = list(np.argsort(spearman_scores)[-5:])
-        sum_sim_market = sum(raw_market_vol[t] for t in similar_indices)
 
         for t in similar_indices:
-            h_w = int(sum_sim_market / raw_market_vol[t])
+            vol_factor = raw_market_vol[t] / np.mean(raw_market_vol)
+            h_w = int(20.0 / vol_factor)
             h_w = np.clip(h_w, 7.0, 60.0)
             x_0 = t + (h_w // 4)
             if x_0 - h_w // 2 < 0: continue
@@ -595,7 +597,8 @@ class RobustParabolicCvarStrategy_sp_760_325_me_95(BasePortfolioStrategy):
                 break
 
             x_0 = min_idx
-            h_w = int(sum_sim_market / raw_market_vol[x_0])
+            vol_factor = raw_market_vol[x_0] / np.mean(raw_market_vol)
+            h_w = int(20.0 / vol_factor)
             h_w = np.clip(h_w, 3.0, 25.0)
             c = 3.0 / (4.0 * h_w)
             a = 3.0 / (h_w ** 3)
@@ -630,6 +633,7 @@ class RobustParabolicCvarStrategy_sp_760_325_me_95(BasePortfolioStrategy):
             W_total += positive_coupon
 
         self.current_market_panic = max_stretch_factor
+        W_total += self.delt
         return W_total / np.sum(W_total)
 
     def optimize_weights(self, historical_returns: pd.DataFrame, prev_weights: np.ndarray,
@@ -647,9 +651,9 @@ class RobustParabolicCvarStrategy_sp_760_325_me_95(BasePortfolioStrategy):
 
         W_days = self._generate_parabolic_kernel_weights(clean_returns_np, vol_matrix_np)
         parabolic_mean_returns = np.sum(clean_returns_np * W_days[:, None], axis=0)
-        weighted_returns = clean_returns_np * W_days[:, None]
+        weighted_returns = clean_returns_np / T_window
 
-        beta = 0.95
+        beta = self.cvar_lvl
         w = cp.Variable(N)
         alpha = cp.Variable()
         u = cp.Variable(T_window)
