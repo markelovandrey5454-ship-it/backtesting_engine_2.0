@@ -38,7 +38,7 @@ class PortfolioOrchestrator:
 
                 div_cols = [f"{col}_div" for col in live_cols]
                 div_slice = self.board_panel[div_cols].loc[:current_date].iloc[:-1]
-                total_return_slice = cleaned_slice.to_numpy() + div_slice.to_numpy() * 0.87
+                total_return_slice = cleaned_slice.to_numpy() + div_slice.to_numpy()
                 historical_returns_adjusted = pd.DataFrame(total_return_slice, index=cleaned_slice.index, columns=live_cols)
 
                 last_day_returns = np.nan_to_num(historical_slice.iloc[-1].to_numpy(), nan=0.0)
