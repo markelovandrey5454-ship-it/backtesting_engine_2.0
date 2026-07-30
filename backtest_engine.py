@@ -11,8 +11,8 @@ class PortfolioOrchestrator:
         self.asset_tickers = [col for col in self.board_panel.columns if not col.endswith('_div')]
         self.volatility_panel = volatility_panel.sort_index()
 
-    def generate_weights_history(self, start_date: str = "2015-01-01") -> dict[str, pd.DataFrame]:
-        test_returns = self.board_panel[self.asset_tickers].loc[start_date:]
+    def generate_weights_history(self, start_date: str = "2015-01-01", end_date: str = "2027-01-01") -> dict[str, pd.DataFrame]:
+        test_returns = self.board_panel[self.asset_tickers].loc[start_date:end_date]
         sim_dates = test_returns.index
 
         weights_histories = {
@@ -62,7 +62,6 @@ class PortfolioOrchestrator:
                 current_weights[name] = new_global_weights
                 weights_histories[name].iloc[t_idx] = current_weights[name]
 
-        #print(weights_histories["Robust_Parabolic_CVaR_Flagship"].iloc[-1])
         return weights_histories
 
 
@@ -98,7 +97,7 @@ class PortfolioBacktester:
         for t in range(1, T):
             prev_capital = portfolio_values[t - 1]
 
-            if sim_dates[t].year != sim_dates[t - 1].year:
+            if sim_dates[t].year != sim_dates[t - 1].year:  # налоги, удалить для сортино
                 tax_base = prev_capital - prev_year_cap
                 if tax_base > 0:
                     tax_amount = tax_base * 0.13
