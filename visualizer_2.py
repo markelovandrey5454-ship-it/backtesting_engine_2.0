@@ -13,12 +13,15 @@ class PortfolioVisualizer:
 
     def plot_scenario_comparison(self, all_strategies_results: dict, scenario_name: str, r_lqdt: pd.Series = None):
         is_lumpsum = scenario_name.lower() == 'lumpsum'
+        sortino_results = {}
+        cagr_results = {}
 
         if is_lumpsum:
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [7, 3]})
+            fig, (ax1, ax2, ax3) = plt.subplots(2, 1, figsize=(14, 13), sharex=True, gridspec_kw={'height_ratios': [7, 3]})
         else:
             fig, ax1 = plt.subplots(1, 1, figsize=(14, 7))
             ax2 = None
+            ax3 = None
 
         inflation_plotted = False
 
@@ -32,14 +35,17 @@ class PortfolioVisualizer:
 
             if is_lumpsum:
                 cagr = (df_res['Nominal_Capital'].iloc[-1] / df_res['Nominal_Capital'].iloc[0]) ** (250.0 / len(df_res)) - 1.0
+                cagr_results[strat_name] = float(cagr * 100)
 
                 r_t = df_res['Nominal_Capital'].pct_change().dropna()
                 if r_lqdt is not None: excess_r = r_t - r_lqdt.loc[r_t.index]
                 else: excess_r = r_t
-                downside_r = excess_r[excess_r < 0]
-                if len(downside_r) > 1 and downside_r.std() > 0:
-                    sortino = np.sqrt(250) * (excess_r.mean() / downside_r.std())
+                downside_r = np.minimum(0, excess_r)
+                downside_std = np.sqrt(np.mean(downside_r ** 2))
+                if downside_std > 0:
+                    sortino = (excess_r.mean() / downside_std) * np.sqrt(252)
                 else: sortino = 0
+                sortino_results[strat_name] = float(sortino)
 
                 label_str = f"{strat_name} (CAGR: {cagr * 100:.2f}%, Sortino: {sortino:.2f})"
             else:
@@ -48,8 +54,10 @@ class PortfolioVisualizer:
 
             line, = ax1.plot(df_res.index, df_res['Nominal_Capital'], label=label_str, linewidth=2)
 
-            if is_lumpsum and ax2 is not None:
+            if strat_name == "High-risk prototype" and is_lumpsum and ax2 is not None:
                 ax2.scatter(r_t.index, r_t.values, alpha=0.5, s=8, color=line.get_color())
+            if strat_name == "Controlled-risk prototype" and is_lumpsum and ax3 is not None:
+                ax3.scatter(r_t.index, r_t.values, alpha=0.5, s=8, color=line.get_color())
 
         ax1.set_title(f"СРАВНИТЕЛЬНОЕ СОРЕВНОВАНИЕ МОДЕЛЕЙ ОПТИМИЗАЦИИ — СЦЕНАРИЙ {scenario_name.upper()}",
                                                                                 fontsize=14, fontweight='bold')
@@ -58,12 +66,16 @@ class PortfolioVisualizer:
         ax1.yaxis.set_major_formatter(mtick.StrMethodFormatter('{x:,.0f}'))
         ax1.legend(loc="upper left", fontsize=11, frameon=True)
 
-        if is_lumpsum and ax2 is not None:
-            ax2.set_xlabel("Дата", fontsize=12)
+        if is_lumpsum and ax2 is not None and ax3 is not None:
             ax2.set_ylabel("Дневная доходность", fontsize=12)
             ax2.set_yscale('symlog', linthresh=0.01)
             ax2.axhline(0, color='black', linestyle='--', alpha=0.5)
             ax2.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+            ax3.set_xlabel("Дата", fontsize=12)
+            ax3.set_ylabel("Дневная доходность", fontsize=12)
+            ax3.set_yscale('symlog', linthresh=0.01)
+            ax3.axhline(0, color='black', linestyle='--', alpha=0.5)
+            ax3.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
         else:
             ax1.set_xlabel("Дата", fontsize=12)
 
