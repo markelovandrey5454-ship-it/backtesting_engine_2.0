@@ -13,8 +13,6 @@ class PortfolioVisualizer:
 
     def plot_scenario_comparison(self, all_strategies_results: dict, scenario_name: str, r_lqdt: pd.Series = None):
         is_lumpsum = scenario_name.lower() == 'lumpsum'
-        sortino_results = {}
-        cagr_results = {}
 
         if is_lumpsum:
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [7, 3]})
@@ -34,7 +32,6 @@ class PortfolioVisualizer:
 
             if is_lumpsum:
                 cagr = (df_res['Nominal_Capital'].iloc[-1] / df_res['Nominal_Capital'].iloc[0]) ** (250.0 / len(df_res)) - 1.0
-                cagr_results[strat_name] = float(cagr * 100)
 
                 r_t = df_res['Nominal_Capital'].pct_change().dropna()
                 if r_lqdt is not None: excess_r = r_t - r_lqdt.loc[r_t.index]
@@ -45,7 +42,6 @@ class PortfolioVisualizer:
                 if downside_std > 0:
                     sortino = (cagr_excess / downside_std) / np.sqrt(252)
                 else: sortino = 0
-                sortino_results[strat_name] = float(sortino)
 
                 label_str = f"{strat_name} (CAGR: {cagr * 100:.2f}%, Sortino: {sortino:.2f})"
             else:
