@@ -1,16 +1,11 @@
 import pandas as pd
 import warnings
 import logging
-import os
-from sklearn.exceptions import ConvergenceWarning
 from backtest_engine import PortfolioOrchestrator, PortfolioBacktester
 from visualizer import PortfolioVisualizer
+from benchmarks import (UniformStrategy, RandomMonkeyStrategy, StochasticMomentumStrategy, PersonalProfileStrategy,
+        MlHeavyweightStrategy, MarkowitzStrategy, RobustParabolicCvarStrategy_old, RobustParabolicCvarStrategy_new)
 
-from benchmarks import (
-                        UniformStrategy, RandomMonkeyStrategy, StochasticMomentumStrategy, PersonalProfileStrategy, MlHeavyweightStrategy,
-                        RobustParabolicCvarStrategy, RobustParabolicCvarStrategy_mh, RobustParabolicCvarStrategy_cp, MarkowitzStrategy)
-
-warnings.filterwarnings("ignore", category=ConvergenceWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 
@@ -24,13 +19,13 @@ if __name__ == "__main__":
     volatility_panel = pd.read_csv(vol_path, parse_dates=['Date']).set_index('Date')
 
     strategies = [
-        UniformStrategy(), RandomMonkeyStrategy(), StochasticMomentumStrategy(), PersonalProfileStrategy(), MlHeavyweightStrategy(),
-        RobustParabolicCvarStrategy(), RobustParabolicCvarStrategy_mh(), RobustParabolicCvarStrategy_cp(), MarkowitzStrategy()
+        UniformStrategy(), RandomMonkeyStrategy(), StochasticMomentumStrategy(), PersonalProfileStrategy(),
+        MlHeavyweightStrategy(), MarkowitzStrategy(), RobustParabolicCvarStrategy_old(), RobustParabolicCvarStrategy_new()
     ]
 
     print("\n[ШАГ 1/3] Запуск динамической симуляции ребалансировок моделей...")
     orchestrator = PortfolioOrchestrator(board_panel, volatility_panel, strategies)
-    all_weights = orchestrator.generate_weights_history(start_date="2015-01-01")
+    all_weights = orchestrator.generate_weights_history(start_date="2015-01-01", end_date="2027-01-01")
 
     print("\n[ШАГ 2/3] Расчет накопления капитала по макро-сценариям...")
     backtester = PortfolioBacktester(board_panel, inflation_annual=0.075, commission=0.0005)
