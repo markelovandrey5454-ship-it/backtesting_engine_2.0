@@ -78,4 +78,3 @@ class PortfolioVisualizer:
         plt.savefig(file_path, dpi=300)
         plt.close()
         print(f"График сценария {scenario_name} успешно сохранен по пути: {file_path}")
-        print("сортино: ", dict(sorted(sortino_results.items(), reverse=True)), "\n\nдоходность: ", dict(sorted(cagr_results.items(), reverse=True)))
