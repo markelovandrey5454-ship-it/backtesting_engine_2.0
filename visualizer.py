@@ -34,9 +34,13 @@ class PortfolioVisualizer:
                 cagr = (df_res['Nominal_Capital'].iloc[-1] / df_res['Nominal_Capital'].iloc[0]) ** (250.0 / len(df_res)) - 1.0
 
                 r_t = df_res['Nominal_Capital'].pct_change().dropna()
-                if r_lqdt is not None: excess_r = r_t - r_lqdt.loc[r_t.index]
-                else: excess_r = r_t
-                cagr_excess = np.prod(1 + excess_r) ** (252.0 / len(excess_r)) - 1.0
+                if r_lqdt is not None:
+                    excess_r = r_t - r_lqdt.loc[r_t.index]
+                    cagr_lqdt = np.exp(np.log1p(r_lqdt.loc[r_t.index]).sum()) ** (252.0 / len(df_res)) - 1.0
+                    cagr_excess = cagr - cagr_lqdt
+                else:
+                    excess_r = r_t
+                    cagr_excess = cagr
                 downside_r = np.minimum(0, excess_r)
                 downside_std = np.sqrt(np.mean(downside_r ** 2))
                 if downside_std > 0:
